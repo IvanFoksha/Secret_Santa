@@ -8,12 +8,14 @@ from config import BOT_TOKEN
 import signal
 import sys
 
+
 def stop_bot(signal, frame):
     print(
         '\nСанта ждет тебя обратно!/\n\n'
         'Чтобы запустить бота введите - /start'
         )
     sys.exit(0)
+
 
 def main():
     init_bd()
@@ -33,6 +35,7 @@ def main():
 
     print('Добро пожаловать к Санте!')
     app.run_polling()
+
 
 signal.signal(signal.SIGINT, stop_bot)
 
