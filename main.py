@@ -1,6 +1,4 @@
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, PreCheckoutQueryHandler
-    
-    
 from handlers.start import start_command, help_command, button_handler
 from handlers.rooms import create_room_handler, join_room_handler
 from handlers.wishes import create_wish_handler, edit_wish_hendler, delete_wish_handler
@@ -11,7 +9,10 @@ import signal
 import sys
 
 def stop_bot(signal, frame):
-    print('\nСанта ждет тебя обратно!')
+    print(
+        '\nСанта ждет тебя обратно!/\n\n'
+        'Чтобы запустить бота введите - /start'
+        )
     sys.exit(0)
 
 def main():
