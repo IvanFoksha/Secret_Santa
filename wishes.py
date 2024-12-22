@@ -31,7 +31,7 @@ async def create_wish_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 
-async def edit_wish_hendler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_wish_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or update.effective_user.id:
         if update.message:
             await update.message.reply_text('Ошибка: пользователь не определен.')
