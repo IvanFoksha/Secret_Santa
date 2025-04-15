@@ -1,70 +1,94 @@
-from database import grant_access
-from telegram import LabeledPrice, Update
+from database import grant_access, get_room_details
+from telegram import Update
 from telegram.ext import ContextTypes
-from config import PRICE_SINGLE_ACCESS, PRICE_FULL_ACCESS
 
 
 async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_chat or not update.effective_chat.id:
-        return
-
-    chat_id = update.effective_chat.id
-    args = context.args if context.args else []
-
-    if len(args) < 1 or args[0] not in ['single', 'full']:
+    """Обработка платежей за доступ к комнате (тестовый режим)"""
+    if not update.effective_user:
         if update.message:
             await update.message.reply_text(
-                'Укажите тип оплаты: /pay single или /pay full'
+                'Ошибка: не удалось определить пользователя'
             )
         return
 
-    if args[0] == 'single':
-        title = 'Расшифровка подарка (1 раз)'
-        description = 'Позволяет увидеть одно сообщение.'
-        price = PRICE_SINGLE_ACCESS
-        payload = 'single_access'
+    user_id = update.effective_user.id
+    
+    # Получаем room_id из callback_data или аргументов команды
+    if update.callback_query:
+        data = update.callback_query.data
+        if data.startswith('pay_full_'):
+            room_id = data.split('_')[2]
+        elif data.startswith('stay_free_'):
+            room_id = data.split('_')[2]
+            # Для бесплатной версии просто обновляем статус
+            grant_access(user_id, 'free')
+            if update.callback_query.message:
+                await update.callback_query.message.reply_text(
+                    'Вы выбрали бесплатную версию.\n'
+                    'Теперь вы можете добавить до 3 желаний.'
+                )
+            return
     else:
-        title = 'Полный доступ к расшифровкам подарков для друзей'
-        description = 'Позволяет получить доступ к функциям комнаты.'
-        price = PRICE_FULL_ACCESS
-        payload = 'full_access'
+        room_id = context.args[0] if context.args else None
 
-    prices = [LabeledPrice(label=title, amount=price)]
-    try:
-        await context.bot.send_invoice(
-            chat_id=chat_id,
-            title=title,
-            description=description,
-            payload=payload,
-            provider_token='YOUR_PROVIDER_TOKEN',
-            currency='RUB',
-            prices=prices
-        )
-    except Exception as e:
+    if not room_id:
         if update.message:
-            await update.message.reply_text(f'Ошибка при оплате: {str(e)}')
+            await update.message.reply_text(
+                'Пожалуйста, укажите код комнаты:\n'
+                '/pay "код комнаты"'
+            )
+        return
+
+    room_details = get_room_details(room_id)
+    if not room_details:
+        if update.message:
+            await update.message.reply_text('Комната не найдена')
+        return
+
+    if room_details['creator_id'] != user_id:
+        if update.message:
+            await update.message.reply_text(
+                'Только создатель комнаты может оплатить полный доступ'
+            )
+        return
+
+    # В тестовом режиме сразу предоставляем доступ
+    grant_access(user_id, 'paid')
+    
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            '✅ Тестовый режим: Оплата успешно выполнена!\n\n'
+            'Теперь ваша комната имеет полный доступ:\n'
+            '• До 10 пользователей\n'
+            '• До 10 желаний для каждого\n'
+            '• Неограниченный просмотр желаний'
+        )
+    else:
+        await update.message.reply_text(
+            '✅ Тестовый режим: Оплата успешно выполнена!\n\n'
+            'Теперь ваша комната имеет полный доступ:\n'
+            '• До 10 пользователей\n'
+            '• До 10 желаний для каждого\n'
+            '• Неограниченный просмотр желаний'
+        )
 
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.successful_payment:
+    """Обработка успешного платежа (тестовый режим)"""
+    if not update.effective_user:
         return
 
-    user_id = update.effective_user.id if update.effective_user else None
-    payload = update.message.successful_payment.invoice_payload
-
-    if user_id is None:
-        if update.message:
-            await update.message.reply_text('Ошибка: не возможно определить пользователя.')
-        return
-
-    if payload == 'single_access':
-        grant_access(user_id, access_type='single')
-        if update.message:
-            await update.message.reply_text('Вы успешно оплатили одноразовый доступ!')
-    elif payload == 'full_access':
-        grant_access(user_id, access_type='full')
-        if update.message:
-            await update.message.reply_text('Вы успешно оплатили полный доступ')
-    else:
-        if update.message:
-            await update.message.reply_text('Неизвестный тип платежа.')
+    user_id = update.effective_user.id
+    
+    # Обновляем статус комнаты
+    grant_access(user_id, 'paid')
+    
+    if update.message:
+        await update.message.reply_text(
+            '✅ Тестовый режим: Оплата успешно выполнена!\n\n'
+            'Теперь ваша комната имеет полный доступ:\n'
+            '• До 10 пользователей\n'
+            '• До 10 желаний для каждого\n'
+            '• Неограниченный просмотр желаний'
+        )
