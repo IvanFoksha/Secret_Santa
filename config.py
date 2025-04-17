@@ -4,14 +4,39 @@ from dotenv import load_dotenv
 # Загружаем переменные окружения
 load_dotenv()
 
-# Токен бота
-BOT_TOKEN = os.getenv('BOT_TOKEN')
+class BaseConfig:
+    """Базовая конфигурация"""
+    DATABASE_URL = "sqlite:///Santa_bot.db"
+    DB_PATH = "Santa_bot.db"
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    PAYMENT_TOKEN = os.getenv("PAYMENT_TOKEN")
+    MAX_FREE_USERS = 5
+    MAX_PAID_USERS = 10
+    MAX_FREE_WISHES = 3
+    MAX_PAID_WISHES = 10
+    WISH_PRICE = 100  # в копейках
 
-# Токен платежной системы
-PAYMENT_TOKEN = os.getenv('PAYMENT_TOKEN')
+class TestConfig(BaseConfig):
+    """Конфигурация для тестирования"""
+    DATABASE_URL = "sqlite:///test_santa_bot.db"
+    DB_PATH = "test_santa_bot.db"
+    BOT_TOKEN = "test_token"
+    PAYMENT_TOKEN = "test_payment_token"
 
-# Путь к базе данных
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Santa_bot.db')
+class ProductionConfig(BaseConfig):
+    """Конфигурация для продакшена"""
+    DATABASE_URL = os.getenv("DATABASE_URL", BaseConfig.DATABASE_URL)
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    PAYMENT_TOKEN = os.getenv("PAYMENT_TOKEN")
+
+# Выбор конфигурации
+config = {
+    'development': BaseConfig,
+    'testing': TestConfig,
+    'production': ProductionConfig
+}
+
+current_config = config[os.getenv('ENVIRONMENT', 'development')]()
 
 # ID администратора
 ADMIN_ID = os.getenv('ADMIN_ID')
@@ -21,14 +46,8 @@ PRICE_FULL_ACCESS = 29900  # 299 рублей в копейках
 PRICE_SINGLE_ACCESS = 9900  # 99 рублей в копейках
 
 # Настройки комнат
-MAX_FREE_USERS = 5
-MAX_PAID_USERS = 10
-MAX_FREE_WISHES = 3
-MAX_PAID_WISHES = 10
-
-# Константы для версий комнат (используются в rooms.py)
-FREE_MAX_USERS = MAX_FREE_USERS
-PRO_MAX_USERS = MAX_PAID_USERS
+FREE_MAX_USERS = current_config.MAX_FREE_USERS
+PRO_MAX_USERS = current_config.MAX_PAID_USERS
 FREE_WISHES_PER_USER = 1
 PRO_WISHES_PER_USER = 5
 

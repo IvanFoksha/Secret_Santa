@@ -9,11 +9,14 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔍 Найти комнату", callback_data="join_room")
         ],
         [
-            InlineKeyboardButton("📝 Создать желание", callback_data="create_wish"),
-            InlineKeyboardButton("✏️ Редактировать желание", callback_data="edit_wish")
+            InlineKeyboardButton("📋 Мои комнаты", callback_data="list_rooms"),
+            InlineKeyboardButton("📝 Создать желание", callback_data="create_wish")
         ],
         [
-            InlineKeyboardButton("📋 Список желаний", callback_data="list_wishes"),
+            InlineKeyboardButton("✏️ Редактировать желание", callback_data="edit_wish"),
+            InlineKeyboardButton("📋 Список желаний", callback_data="list_wishes")
+        ],
+        [
             InlineKeyboardButton("❓ Помощь", callback_data="help")
         ]
     ]
