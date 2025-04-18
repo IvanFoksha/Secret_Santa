@@ -45,3 +45,7 @@ PRICE_SINGLE_ACCESS = 9900  # 99 рублей в копейках
 # Настройки комнат
 FREE_MAX_USERS = current_config.MAX_FREE_USERS
 PRO_MAX_USERS = current_config.MAX_PAID_USERS
+
+# Настройки желаний
+FREE_MAX_WISHES = 3  # Максимальное количество желаний в бесплатной версии
+PRO_MAX_WISHES = 10  # Максимальное количество желаний в PRO версии

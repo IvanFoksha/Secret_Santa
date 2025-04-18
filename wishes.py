@@ -1,15 +1,16 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-from database import add_wish, get_user_wishes, get_user_room, update_wish, Session, engine, get_wish
-from sqlalchemy.orm import Session as SQLAlchemySession
-from database import User, Wish, Room
-from telegram.ext import ConversationHandler
+from telegram.ext import ContextTypes, ConversationHandler
+from database import (
+    add_wish, get_user_room, get_user_wishes, update_wish, get_wish,
+    Session, User, Wish, Room, count_users_in_room
+)
 from keyboards import get_wish_actions_keyboard
 from datetime import datetime, time
 import asyncio
 
 logger = logging.getLogger(__name__)
+
 
 def get_main_menu_keyboard():
     """Создает основную клавиатуру меню"""
@@ -20,15 +21,6 @@ def get_main_menu_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_wish_actions_keyboard():
-    """Создает клавиатуру действий с желаниями"""
-    keyboard = [
-        [InlineKeyboardButton("📝 Добавить желание", callback_data="add_wish")],
-        [InlineKeyboardButton("✏️ Редактировать желания", callback_data="edit_wish")],
-        [InlineKeyboardButton("📋 Мои желания", callback_data="list_wishes")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
 
 async def create_wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик создания желания"""
@@ -36,30 +28,20 @@ async def create_wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     logger.info(f"Пользователь {user_id} создает желание")
     
     # Проверяем, состоит ли пользователь в комнате
-    session = Session()
-    try:
-        user = session.query(User).filter(User.telegram_id == user_id).first()
-        if not user or not user.room_id:
-            await update.callback_query.message.reply_text(
-                "Вы не состоите в комнате. Сначала присоединитесь к комнате или создайте новую."
-            )
-            return ConversationHandler.END
-            
-        # Запрашиваем текст желания
+    user_room = get_user_room(user_id)
+    if not user_room or not user_room.get('room_id'):
         await update.callback_query.message.reply_text(
-            "Пожалуйста, введите текст вашего желания:"
+            "Вы не состоите в комнате. Сначала присоединитесь к комнате или создайте новую."
         )
-        context.user_data['waiting_for'] = 'wish'
         return ConversationHandler.END
         
-    except Exception as e:
-        logger.error(f"Ошибка при создании желания: {e}")
-        await update.callback_query.message.reply_text(
-            "Произошла ошибка при создании желания. Попробуйте еще раз."
-        )
-        return ConversationHandler.END
-    finally:
-        session.close()
+    # Запрашиваем текст желания
+    await update.callback_query.message.reply_text(
+        "Пожалуйста, введите текст вашего желания:"
+    )
+    context.user_data['waiting_for'] = 'wish'
+    return ConversationHandler.END
+
 
 async def handle_wish_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текста желания"""
@@ -69,36 +51,32 @@ async def handle_wish_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     wish_text = update.message.text
     
-    session = Session()
-    try:
-        user = session.query(User).filter(User.telegram_id == user_id).first()
-        if not user or not user.room_id:
-            await update.message.reply_text(
-                "Вы не состоите в комнате. Сначала присоединитесь к комнате или создайте новую."
-            )
-            return
-            
-        # Сохраняем желание
-        wish_id = add_wish(user_id, wish_text)
-        
-        if wish_id:
-            await update.message.reply_text(
-                "✅ Желание успешно добавлено!",
-                reply_markup=get_wish_actions_keyboard()
-            )
-        else:
-            await update.message.reply_text(
-                "❌ Не удалось добавить желание. "
-                "Проверьте, что вы состоите в комнате и не превышен лимит желаний."
-            )
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении желания: {e}")
+    # Проверяем, состоит ли пользователь в комнате
+    user_room = get_user_room(user_id)
+    if not user_room or not user_room.get('room_id'):
         await update.message.reply_text(
-            "Произошла ошибка при сохранении желания. Попробуйте еще раз."
+            "Вы не состоите в комнате. Сначала присоединитесь к комнате или создайте новую."
         )
-    finally:
-        session.close()
-        context.user_data['waiting_for'] = None
+        return
+        
+    room_id = user_room['room_id']
+    
+    # Сохраняем желание
+    success, message_text = add_wish(room_id, user_id, wish_text)
+    
+    if success:
+        await update.message.reply_text(
+            "✅ Желание успешно добавлено!",
+            reply_markup=get_wish_actions_keyboard()
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Не удалось добавить желание: {message_text}\n"
+            "Проверьте, что вы состоите в комнате и не превышен лимит желаний."
+        )
+    
+    context.user_data['waiting_for'] = None
+
 
 async def edit_wish_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик редактирования желаний"""
@@ -152,52 +130,53 @@ async def edit_wish_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пожалуйста, попробуйте позже."
         )
 
+
 async def list_wishes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает список желаний пользователя"""
+    """Показывает список желаний пользователя в текущей комнате"""
     user_id = update.effective_user.id
-    room = get_user_room(user_id)
     
-    if not room or room['room_id'] == 0:
-        await update.callback_query.message.reply_text(
-            "❌ Вы не состоите ни в одной комнате."
-        )
-        return
-    
-    # Проверяем существование комнаты
     session = Session()
     try:
-        db_room = session.query(Room).filter(Room.id == room['room_id']).first()
-        if not db_room:
+        # Находим пользователя
+        user = session.query(User).filter(User.telegram_id == user_id).first()
+        if not user or not user.room_id:
+            await update.callback_query.message.reply_text(
+                "❌ Вы не состоите ни в одной комнате."
+            )
+            return
+            
+        # Находим комнату
+        room = session.query(Room).filter(Room.id == user.room_id).first()
+        if not room:
             await update.callback_query.message.reply_text(
                 "❌ Комната не найдена. Возможно, она была удалена."
             )
             return
             
-        wishes = get_user_wishes(user_id, room['room_id'])
+        # Получаем желания пользователя в текущей комнате
+        wishes = get_user_wishes(user_id, user.room_id)
+        
         if not wishes:
             await update.callback_query.message.reply_text(
-                "📝 У вас пока нет желаний.",
+                "📝 У вас пока нет желаний в этой комнате.",
                 reply_markup=get_wish_actions_keyboard()
             )
             return
         
-        message = "📋 Ваши желания:\n\n"
+        message = f"📋 Ваши желания в комнате {room.code}:\n\n"
         for i, wish in enumerate(wishes, 1):
             message += f"{i}. {wish['text']}\n"
         
         # Добавляем информацию о комнате
-        message += f"\n🏠 {db_room.name}\n"
-        message += f"🎁 Максимум желаний: {db_room.max_wishes}\n"
-        message += (
-            f"👥 Участников: {room['current_users']}/"
-            f"{db_room.max_participants}\n"
-        )
+        message += f"\n🏠 Комната {room.code}\n"
+        message += f"🎁 Максимум желаний: {10 if room.is_paid else 3}\n"
+        message += f"👥 Участников: {count_users_in_room(room.id)}/{room.max_participants}\n"
         
-        # Используем готовую клавиатуру с действиями
         await update.callback_query.message.reply_text(
             message,
             reply_markup=get_wish_actions_keyboard()
         )
+        
     except Exception as e:
         logger.error(f"Ошибка при получении списка желаний: {e}")
         await update.callback_query.message.reply_text(
@@ -206,6 +185,7 @@ async def list_wishes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     finally:
         session.close()
+
 
 async def edit_specific_wish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик редактирования конкретного желания"""
@@ -257,6 +237,7 @@ async def edit_specific_wish(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         if 'session' in locals():
             session.close()
+
 
 async def handle_edit_wish_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нового текста желания при редактировании"""
@@ -319,7 +300,8 @@ async def handle_edit_wish_text(update: Update, context: ContextTypes.DEFAULT_TY
         if 'session' in locals():
             session.close()
 
-async def send_daily_wishes():
+
+async def send_daily_wishes(context: ContextTypes.DEFAULT_TYPE):
     """Функция для ежедневной рассылки желаний"""
     logger.info("Начало ежедневной рассылки желаний")
     session = Session()
@@ -354,11 +336,12 @@ async def send_daily_wishes():
                                 )
                             except Exception as e:
                                 logger.error(f"Ошибка при отправке желаний пользователю {recipient.telegram_id}: {e}")
-                
+        
     except Exception as e:
         logger.error(f"Ошибка при рассылке желаний: {e}")
     finally:
         session.close()
+
 
 async def schedule_wishes(context: ContextTypes.DEFAULT_TYPE):
     """Планировщик для ежедневной рассылки желаний"""

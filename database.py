@@ -8,8 +8,8 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
-from config import current_config
-from typing import Optional, Dict, Any, List, Union
+from config import current_config, FREE_MAX_WISHES, PRO_MAX_WISHES
+from typing import Optional, Dict, Any, List, Union, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -371,37 +371,41 @@ def count_users_in_room(room_id: int) -> int:
         session.close()
 
 
-def add_wish(user_id: int, wish_text: str) -> int:
-    """Добавляет новое желание в базу данных"""
+def add_wish(room_id: int, user_id: int, wish_text: str) -> Tuple[bool, str]:
+    """
+    Добавляет желание в комнату
+    Returns:
+        Tuple[bool, str]: (успех операции, сообщение)
+    """
     session = Session()
     try:
-        # Получаем пользователя
-        user = session.query(User).filter(User.id == user_id).first()
+        # Получаем пользователя по telegram_id
+        user = session.query(User).filter(User.telegram_id == user_id).first()
         if not user:
-            logger.error(f"Пользователь {user_id} не найден")
-            return 0
-            
-        # Проверяем, что пользователь состоит в комнате
-        if not user.room_id:
-            logger.error(f"Пользователь {user_id} не состоит в комнате")
-            return 0
-            
+            return False, "Пользователь не найден"
+
+        # Проверяем лимиты комнаты
+        limits_exceeded, message = check_room_limits(room_id, user.id)
+        if limits_exceeded:
+            return False, message
+
         # Создаем новое желание
         wish = Wish(
+            room_id=room_id,
+            user_id=user.id,  # Используем id пользователя из базы данных
             text=wish_text,
-            user_id=user_id,
-            room_id=user.room_id
+            created_at=datetime.utcnow()
         )
+        
         session.add(wish)
         session.commit()
         
-        logger.info(f"Добавлено желание для пользователя {user_id}")
-        return wish.id
+        return True, "Желание успешно добавлено"
         
     except Exception as e:
-        logger.error(f"Ошибка при добавлении желания: {e}")
         session.rollback()
-        return 0
+        logger.error(f"Ошибка при добавлении желания: {e}")
+        return False, "Произошла ошибка при добавлении желания"
     finally:
         session.close()
 
@@ -834,7 +838,6 @@ def get_user_room(user_id: int) -> dict:
                 'room_id': 0,
                 'code': '',
                 'is_paid': False,
-                'max_wishes': 0,
                 'current_users': 0,
                 'max_participants': 0
             }
@@ -844,7 +847,6 @@ def get_user_room(user_id: int) -> dict:
             'room_id': room.id,
             'code': room.code,
             'is_paid': room.is_paid,
-            'max_wishes': room.max_wishes,
             'current_users': count_users_in_room(room.id),
             'max_participants': room.max_participants
         }
@@ -934,7 +936,6 @@ def get_room_by_code(code: str) -> Optional[Dict[str, Any]]:
             'is_paid': room.is_paid,
             'max_participants': room.max_participants,
             'current_participants': users_count,
-            'max_wishes': room.max_wishes,
             'is_active': room.is_active
         }
     except Exception as e:
@@ -1036,7 +1037,6 @@ def get_room_statistics(room_id: int) -> Optional[Dict[str, Any]]:
             'is_paid': room.is_paid,
             'max_participants': room.max_participants,
             'current_participants': users_count,
-            'max_wishes': room.max_wishes,
             'total_wishes': wishes_count,
             'viewed_wishes': viewed_wishes,
             'last_activity': room.last_activity,
@@ -1049,28 +1049,45 @@ def get_room_statistics(room_id: int) -> Optional[Dict[str, Any]]:
         session.close()
 
 
-def check_room_limits(room_id: int) -> tuple[bool, str]:
-    """Проверяет лимиты комнаты и возвращает статус и сообщение"""
+def check_room_limits(room_id: int, user_id: int) -> Tuple[bool, str]:
+    """
+    Проверяет лимиты комнаты для пользователя
+    Returns:
+        Tuple[bool, str]: (превышены ли лимиты, сообщение)
+    """
     session = Session()
     try:
+        # Проверяем существование комнаты
         room = session.query(Room).filter(Room.id == room_id).first()
         if not room:
-            return False, "Комната не найдена"
-            
-        # Проверяем количество пользователей
-        users_count = session.query(User).filter(User.room_id == room_id).count()
+            return True, "Комната не найдена"
+
+        # Подсчитываем количество пользователей в комнате
+        users_count = session.query(User).filter(
+            User.room_id == room_id
+        ).count()
+
+        # Подсчитываем количество желаний пользователя в комнате
+        wishes_count = session.query(Wish).filter(
+            Wish.room_id == room_id,
+            Wish.user_id == user_id
+        ).count()
+
+        # Определяем максимальное количество желаний
+        max_wishes = PRO_MAX_WISHES if room.is_paid else FREE_MAX_WISHES
+
+        # Проверяем лимиты
         if users_count >= room.max_participants:
-            return False, "Достигнут лимит участников"
-            
-        # Проверяем количество желаний
-        wishes_count = session.query(Wish).filter(Wish.room_id == room_id).count()
-        if wishes_count >= (room.max_wishes * users_count):
-            return False, "Достигнут лимит желаний"
-            
-        return True, "Лимиты в порядке"
+            return True, "Достигнут лимит участников в комнате"
+        
+        if wishes_count >= max_wishes:
+            return True, f"Достигнут лимит желаний ({max_wishes})"
+
+        return False, "Лимиты не превышены"
+
     except Exception as e:
         logger.error(f"Ошибка при проверке лимитов комнаты: {e}")
-        return False, "Ошибка при проверке лимитов"
+        return True, "Произошла ошибка при проверке лимитов"
     finally:
         session.close()
 
@@ -1245,8 +1262,6 @@ def delete_room(room_id: int, user_id: int) -> bool:
 MAX_ROOMS_PER_USER = 3
 FREE_MAX_USERS = 5
 PRO_MAX_USERS = 10
-FREE_MAX_WISHES = 1
-PRO_MAX_WISHES = 5
 
 
 def get_room_participants(room_id: int) -> Dict[str, Any]:

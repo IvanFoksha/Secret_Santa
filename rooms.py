@@ -3,7 +3,7 @@ import string
 import logging
 from database import (
     create_room, count_users_in_room, add_user_to_room, user_has_room,
-    room_exists, get_room_details, get_room_id_by_code, add_user,
+    room_exists, get_room_details, get_room_id_by_code,
     get_all_rooms, generate_room_code, count_user_rooms, get_user_room,
     get_room_users, update_room_version, get_user_rooms_count, MAX_ROOMS_PER_USER,
     get_user_wishes, get_user_by_telegram_id, get_room_by_id, check_user_in_room,
@@ -21,10 +21,8 @@ logger = logging.getLogger(__name__)
 def get_room_context_menu():
     """Создает контекстное меню для комнаты"""
     keyboard = [
-        [InlineKeyboardButton("📝 Добавить желание", callback_data="add_wish")],
-        [InlineKeyboardButton("📋 Мои желания", callback_data="list_wishes")],
-        [InlineKeyboardButton("👥 Участники комнаты", callback_data="list_room_users")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
+        [InlineKeyboardButton("🔙 Назад", callback_data="room_menu")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -738,111 +736,17 @@ async def handle_room_context_menu(update: Update, context: ContextTypes.DEFAULT
     action = query.data
     logger.info(f"Получен callback_data: {action}")
     
-    if action == "add_wish":
-        # Перенаправляем на добавление желания
+    if action == "room_menu":
+        # Возвращаемся в меню комнаты
         await query.message.edit_text(
-            "📝 Введите ваше желание (до 250 символов):",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="room_menu")
-            ]])
-        )
-        context.user_data['waiting_for'] = 'wish_text'
-        
-    elif action == "list_wishes":
-        # Показываем список желаний
-        user_id = query.from_user.id
-        user_room = get_user_room(user_id)
-        
-        if not user_room:
-            await query.message.edit_text(
-                "❌ Вы не состоите ни в одной комнате.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-        
-        # Получаем ID комнаты и проверяем его тип
-        room_id = user_room.get('id')
-        if not room_id:
-            await query.message.edit_text(
-                "❌ Не удалось определить ID комнаты.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-            
-        # Используем get_user_wishes
-        wishes = get_user_wishes(user_id, int(room_id))
-        
-        if not wishes:
-            await query.message.edit_text(
-                "📋 У вас пока нет желаний в этой комнате.",
-                reply_markup=get_room_context_menu()
-            )
-            return
-            
-        message = "📋 Ваши желания:\n\n"
-        for i, wish in enumerate(wishes, 1):
-            wish_text = wish.get('text', 'Нет текста')
-            message += f"{i}. {wish_text}\n"
-            
-        await query.message.edit_text(
-            message,
+            "Выберите действие:",
             reply_markup=get_room_context_menu()
         )
-        
-    elif action == "list_room_users":
-        # Показываем список участников комнаты
-        user_id = query.from_user.id
-        user_room = get_user_room(user_id)
-        
-        if not user_room:
-            await query.message.edit_text(
-                "❌ Вы не состоите ни в одной комнате.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-            
-        room_id = user_room.get('id')
-        if not room_id:
-            await query.message.edit_text(
-                "❌ Не удалось определить ID комнаты.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-            
-        room = get_room_details(room_id)
-        if not room:
-            await query.message.edit_text(
-                "❌ Комната не найдена.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-            
-        users = get_room_users(room_id)
-        message = f"👥 Участники комнаты '{room['name']}':\n\n"
-        
-        for user in users:
-            role = "👑 Создатель" if user.get('id') == room.get('creator_id') else "👤 Участник"
-            first_name = user.get('first_name', '')
-            last_name = user.get('last_name', '')
-            message += f"{role}: {first_name} {last_name or ''}\n"
-            
-        await query.message.edit_text(
-            message,
-            reply_markup=get_room_context_menu()
-        )
-        
     elif action == "main_menu":
         # Возвращаемся в главное меню
         await query.message.edit_text(
             "Главное меню:",
             reply_markup=get_main_menu_keyboard()
-        )
-        
-    elif action == "room_menu":
-        # Возвращаемся в меню комнаты
-        await query.message.edit_text(
-            "Меню комнаты:",
-            reply_markup=get_room_context_menu()
         )
 
 async def delete_room_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

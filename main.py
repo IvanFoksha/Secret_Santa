@@ -92,29 +92,14 @@ async def message_handler(update: Update, context):
         await handle_wish_text(update, context)
         return
     
-    # Если пользователь ожидает ввода нового желания
-    if context.user_data.get('waiting_for') == 'new_wish':
-        await handle_wish_text(update, context)
-        return
-    
-    # Если пользователь ожидает ввода кода комнаты для редактирования
-    if context.user_data.get('waiting_for') == 'edit_wish_room':
-        await edit_wish_handler(update, context)
-        return
-    
-    # Если пользователь ожидает ввода номера желания для редактирования
-    if context.user_data.get('waiting_for') == 'edit_wish_number':
-        await edit_wish_handler(update, context)
-        return
-    
     # Если пользователь ожидает ввода нового текста желания
     if context.user_data.get('editing_wish_id'):
         await handle_edit_wish_text(update, context)
         return
     
-    # Если не ожидается никакого ввода, показываем главное меню
+    # Если не обработано ни одно из специальных состояний
     await update.message.reply_text(
-        "Выберите действие из меню ниже 👇",
+        "Пожалуйста, выберите действие из главного меню",
         reply_markup=get_main_menu_keyboard()
     )
 
@@ -175,7 +160,7 @@ def main():
         application.add_handler(
             CallbackQueryHandler(
                 handle_room_context_menu,
-                pattern="^(add_wish|list_wishes|list_room_users|main_menu|room_menu)$"
+                pattern="^(room_menu|main_menu)$"
             )
         )
         
