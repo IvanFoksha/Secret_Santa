@@ -3,7 +3,7 @@ import logging
 import random
 import string
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, BigInteger, Index, Text, Table, and_
+    create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, BigInteger, Index, Text, Table, and_, func
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -907,27 +907,31 @@ def get_room_by_code(code: str) -> Optional[Dict[str, Any]]:
     session = Session()
     try:
         # Преобразуем код в верхний регистр для поиска
-        code = code.upper()
+        code = code.upper().strip()
         logger.info(f"Поиск комнаты с кодом {code}")
         
         # Проверяем все существующие коды комнат для отладки
-        all_codes = session.query(Room.code).all()
-        code_list = [c[0] for c in all_codes]
+        all_rooms = session.query(Room).all()
+        code_list = [room.code for room in all_rooms]
         logger.info(f"Существующие коды комнат: {code_list}")
         
         # Ищем комнату по коду (без учета регистра)
         room = session.query(Room).filter(
-            Room.code == code
+            func.upper(Room.code) == code
         ).first()
         
         if not room:
             logger.info(f"Комната с кодом {code} не найдена")
             return None
             
+        logger.info(f"Найдена комната: id={room.id}, code={room.code}, creator_id={room.creator_id}")
+            
         # Получаем дополнительную информацию о комнате
         users_count = session.query(User).filter(
             User.room_id == room.id
         ).count()
+        
+        logger.info(f"Количество пользователей в комнате: {users_count}")
         
         return {
             'id': room.id,
@@ -1092,97 +1096,120 @@ def check_room_limits(room_id: int, user_id: int) -> Tuple[bool, str]:
         session.close()
 
 
-def can_join_room(room_id: int, user_id: int) -> tuple[bool, str]:
-    """Проверяет возможность подключения пользователя к комнате"""
+def can_join_room(room_id: int, user_id: int) -> Tuple[bool, str]:
+    """
+    Проверяет, может ли пользователь присоединиться к комнате.
+    
+    Args:
+        room_id: ID комнаты
+        user_id: Telegram ID пользователя
+        
+    Returns:
+        Tuple[bool, str]: (может присоединиться, сообщение)
+    """
     session = Session()
     try:
+        logger.info(f"Проверка возможности присоединения пользователя {user_id} к комнате {room_id}")
+        
         # Проверяем существование комнаты
         room = session.query(Room).filter(Room.id == room_id).first()
         if not room:
+            logger.info(f"Комната {room_id} не найдена")
             return False, "Комната не найдена"
             
         if not room.is_active:
+            logger.info(f"Комната {room_id} неактивна")
             return False, "Комната неактивна"
-            
-        # Проверяем количество участников
-        users_count = session.query(User).filter(
-            User.room_id == room_id
-        ).count()
-        if users_count >= room.max_participants:
-            return False, "Комната заполнена"
-            
-        # Проверяем, не состоит ли пользователь уже в комнате
-        user = session.query(User).filter(
-            User.telegram_id == user_id
-        ).first()
-        if not user:
-            return False, "Пользователь не найден"
-            
-        # Проверяем, не состоит ли пользователь уже в этой комнате
-        already_joined = session.query(user_room_association).filter(
-            user_room_association.c.user_id == user.id,
-            user_room_association.c.room_id == room_id
-        ).first()
-        
-        if already_joined:
-            return False, "Вы уже состоите в этой комнате"
-            
-        # Проверяем общее количество комнат пользователя
-        # (созданных и присоединенных)
-        created_rooms = session.query(Room).filter(
-            Room.creator_id == user.id
-        ).count()
-        
-        # Проверяем количество присоединенных комнат через таблицу связи
-        joined_rooms = session.query(user_room_association).filter(
-            user_room_association.c.user_id == user.id
-        ).count()
-        
-        total_rooms = created_rooms + joined_rooms
-        if total_rooms >= 3:
-            return False, "Вы уже состоите в максимальном количестве комнат (3)"
-            
-        return True, "Можно подключиться"
-    except Exception as e:
-        logger.error(f"Ошибка при проверке возможности подключения: {e}")
-        return False, "Ошибка при проверке"
-    finally:
-        session.close()
-
-
-def join_room(room_id: int, user_id: int) -> tuple[bool, str]:
-    """Подключает пользователя к комнате"""
-    session = Session()
-    try:
-        # Проверяем возможность подключения
-        can_join, message = can_join_room(room_id, user_id)
-        if not can_join:
-            return False, message
             
         # Получаем пользователя
         user = session.query(User).filter(User.telegram_id == user_id).first()
         if not user:
+            logger.info(f"Пользователь {user_id} не найден")
             return False, "Пользователь не найден"
             
-        # Подключаем к комнате через таблицу связи
-        stmt = user_room_association.insert().values(
-            user_id=user.id,
-            room_id=room_id
-        )
-        session.execute(stmt)
-        session.commit()
+        # Проверяем, не является ли пользователь создателем комнаты
+        if room.creator_id == user.id:
+            logger.info(f"Пользователь {user_id} является создателем комнаты {room_id}")
+            return False, "Вы уже являетесь создателем этой комнаты"
+            
+        # Проверяем, не состоит ли пользователь уже в комнате
+        if user in room.users:
+            logger.info(f"Пользователь {user_id} уже состоит в комнате {room_id}")
+            return False, "Вы уже состоите в этой комнате"
+            
+        # Проверяем количество участников
+        current_participants = len(room.users)
+        if current_participants >= room.max_participants:
+            logger.info(f"Комната {room_id} заполнена ({current_participants}/{room.max_participants})")
+            return False, "Комната заполнена"
+            
+        logger.info(f"Пользователь {user_id} может присоединиться к комнате {room_id}")
+        return True, "Можно присоединиться"
         
-        # Обновляем время активности комнаты
-        room = session.query(Room).filter(Room.id == room_id).first()
-        room.last_activity = datetime.utcnow()
-        session.commit()
-        
-        logger.info(f"Пользователь {user_id} успешно подключен к комнате {room_id}")
-        return True, "Успешное подключение к комнате"
     except Exception as e:
-        logger.error(f"Ошибка при подключении к комнате: {e}")
+        logger.error(f"Ошибка при проверке возможности присоединения к комнате: {e}")
+        return False, "Произошла ошибка при проверке возможности присоединения"
+    finally:
+        session.close()
+
+
+def join_room(room_id: int, user_id: int) -> Tuple[bool, str]:
+    """
+    Присоединяет пользователя к комнате.
+    
+    Args:
+        room_id: ID комнаты
+        user_id: Telegram ID пользователя
+        
+    Returns:
+        Tuple[bool, str]: (успех операции, сообщение)
+    """
+    session = Session()
+    try:
+        logger.info(f"Попытка присоединения пользователя {user_id} к комнате {room_id}")
+        
+        # Получаем пользователя по telegram_id
+        user = session.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            logger.error(f"Пользователь с telegram_id {user_id} не найден")
+            return False, "Пользователь не найден"
+            
+        # Получаем комнату
+        room = session.query(Room).filter(Room.id == room_id).first()
+        if not room:
+            logger.error(f"Комната {room_id} не найдена")
+            return False, "Комната не найдена"
+            
+        # Проверяем возможность присоединения
+        can_join, message = can_join_room(room_id, user_id)
+        if not can_join:
+            logger.info(f"Невозможно присоединиться: {message}")
+            return False, message
+            
+        # Проверяем, не состоит ли пользователь уже в комнате
+        if user in room.users:
+            logger.info(f"Пользователь {user_id} уже состоит в комнате {room_id}")
+            return False, "Вы уже состоите в этой комнате"
+            
+        # Добавляем пользователя в комнату через таблицу связи
+        session.execute(
+            user_room_association.insert().values(
+                user_id=user.id,
+                room_id=room_id
+            )
+        )
+        
+        # Обновляем время последней активности комнаты
+        room.last_activity = datetime.utcnow()
+        
+        session.commit()
+        logger.info(f"Пользователь {user_id} успешно присоединился к комнате {room_id}")
+        return True, "Вы успешно присоединились к комнате"
+        
+    except Exception as e:
+        logger.error(f"Ошибка при присоединении к комнате: {e}")
         session.rollback()
-        return False, "Ошибка при подключении"
+        return False, "Произошла ошибка при присоединении к комнате"
     finally:
         session.close()
 

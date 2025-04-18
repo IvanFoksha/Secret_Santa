@@ -75,6 +75,13 @@ async def handle_wish_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Проверьте, что вы состоите в комнате и не превышен лимит желаний."
         )
     
+    # Если достигнут лимит желаний, показываем меню
+    if not success and "превышен лимит желаний" in message_text.lower():
+        await update.message.reply_text(
+            "Выберите действие:",
+            reply_markup=get_main_menu_keyboard()
+        )
+    
     context.user_data['waiting_for'] = None
 
 
