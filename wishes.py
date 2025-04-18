@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session as SQLAlchemySession
 from database import User, Wish, Room
 from telegram.ext import ConversationHandler
 from keyboards import get_wish_actions_keyboard
+from datetime import datetime, time
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -43,19 +45,6 @@ async def create_wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             )
             return ConversationHandler.END
             
-        # Проверяем количество желаний
-        current_wishes = session.query(Wish).filter(
-            Wish.user_id == user.id,
-            Wish.room_id == user.room_id
-        ).count()
-        
-        if current_wishes >= user.room.max_wishes:
-            await update.callback_query.message.reply_text(
-                f"Вы достигли лимита желаний ({user.room.max_wishes}). "
-                "Удалите существующее желание, чтобы добавить новое."
-            )
-            return ConversationHandler.END
-            
         # Запрашиваем текст желания
         await update.callback_query.message.reply_text(
             "Пожалуйста, введите текст вашего желания:"
@@ -86,19 +75,6 @@ async def handle_wish_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user or not user.room_id:
             await update.message.reply_text(
                 "Вы не состоите в комнате. Сначала присоединитесь к комнате или создайте новую."
-            )
-            return
-            
-        # Проверяем количество желаний
-        current_wishes = session.query(Wish).filter(
-            Wish.user_id == user.id,
-            Wish.room_id == user.room_id
-        ).count()
-        
-        if current_wishes >= user.room.max_wishes:
-            await update.message.reply_text(
-                f"Вы достигли лимита желаний ({user.room.max_wishes}). "
-                "Удалите существующее желание, чтобы добавить новое."
             )
             return
             
@@ -342,3 +318,65 @@ async def handle_edit_wish_text(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop('editing_wish_id', None)
         if 'session' in locals():
             session.close()
+
+async def send_daily_wishes():
+    """Функция для ежедневной рассылки желаний"""
+    logger.info("Начало ежедневной рассылки желаний")
+    session = Session()
+    try:
+        # Получаем все комнаты
+        rooms = session.query(Room).all()
+        
+        for room in rooms:
+            # Получаем всех пользователей в комнате
+            users = session.query(User).filter(User.room_id == room.id).all()
+            
+            for user in users:
+                # Получаем желания пользователя
+                wishes = session.query(Wish).filter(
+                    Wish.user_id == user.id,
+                    Wish.room_id == room.id
+                ).all()
+                
+                if wishes:
+                    # Формируем сообщение с желаниями
+                    message = f"🎁 Желания пользователя {user.username or 'Аноним'}:\n\n"
+                    for wish in wishes:
+                        message += f"• {wish.text}\n"
+                    
+                    # Отправляем желания всем пользователям в комнате
+                    for recipient in users:
+                        if recipient.id != user.id:  # Не отправляем пользователю его собственные желания
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=recipient.telegram_id,
+                                    text=message
+                                )
+                            except Exception as e:
+                                logger.error(f"Ошибка при отправке желаний пользователю {recipient.telegram_id}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Ошибка при рассылке желаний: {e}")
+    finally:
+        session.close()
+
+async def schedule_wishes(context: ContextTypes.DEFAULT_TYPE):
+    """Планировщик для ежедневной рассылки желаний"""
+    while True:
+        now = datetime.now().time()
+        target_time = time(0, 0)  # 00:00
+        
+        # Вычисляем время до следующей рассылки
+        if now >= target_time:
+            # Если текущее время больше или равно целевому, ждем до следующего дня
+            next_run = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            next_run = next_run.replace(day=next_run.day + 1)
+        else:
+            # Иначе ждем до сегодняшнего целевого времени
+            next_run = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Ждем до следующего запуска
+        await asyncio.sleep((next_run - datetime.now()).total_seconds())
+        
+        # Запускаем рассылку
+        await send_daily_wishes(context)

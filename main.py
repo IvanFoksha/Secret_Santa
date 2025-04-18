@@ -11,9 +11,12 @@ from rooms import (
     create_room_handler, join_room_handler, handle_room_code,
     handle_room_version, list_rooms, search_room, confirm_join_handler,
     handle_room_context_menu, delete_room_handler, confirm_delete_handler,
-    cancel_delete_handler
+    cancel_delete_handler, switch_room_handler
 )
-from wishes import handle_wish_text, edit_wish_handler, handle_edit_wish_text
+from wishes import (
+    handle_wish_text, edit_wish_handler, handle_edit_wish_text,
+    schedule_wishes, add_wish, list_wishes
+)
 from database import init_bd, switch_room, get_room_by_id
 from keyboards import get_main_menu_keyboard
 
@@ -203,7 +206,10 @@ def main():
         application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler)
         )
-
+        
+        # Запускаем планировщик рассылки желаний
+        application.job_queue.run_repeating(schedule_wishes, interval=86400)  # 24 часа
+        
         # Запускаем бота
         logger.info("Запускаем бота...")
         application.run_polling(allowed_updates=Update.ALL_TYPES)

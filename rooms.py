@@ -6,7 +6,8 @@ from database import (
     room_exists, get_room_details, get_room_id_by_code, add_user,
     get_all_rooms, generate_room_code, count_user_rooms, get_user_room,
     get_room_users, update_room_version, get_user_rooms_count, MAX_ROOMS_PER_USER,
-    get_user_wishes
+    get_user_wishes, get_user_by_telegram_id, get_room_by_id, check_user_in_room,
+    switch_room
 )
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -149,19 +150,6 @@ async def join_room_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     
-    # Проверяем количество комнат пользователя перед присоединением
-    rooms_count = await get_user_rooms_count(user_id)
-    logger.info(f"Пользователь {user_id} имеет {rooms_count} комнат, лимит {MAX_ROOMS_PER_USER}")
-    
-    if rooms_count >= MAX_ROOMS_PER_USER:
-        await update.message.reply_text(
-            "❌ Вы достигли лимита в 3 комнаты. "
-            "Пожалуйста, выйдите из одной из существующих комнат, "
-            "чтобы присоединиться к новой.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return
-    
     if update.message and update.message.text.startswith('/join_room'):
         args = update.message.text.split()
         if len(args) > 1:
@@ -198,41 +186,28 @@ async def join_room_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Проверяем наличие свободных мест
             if room_details['current_users'] >= room_details['max_participants']:
                 await update.message.reply_text(
-                    '❌ В комнате больше нет свободных мест',
+                    '❌ В комнате нет свободных мест',
                     reply_markup=get_main_menu_keyboard()
                 )
                 return
 
-            # Формируем сообщение с информацией о комнате
-            message = (
-                f"🔍 Найдена комната:\n\n"
-                f"🏠 Название: {room_details['name']}\n"
-                f"👥 Участников: {room_details['current_users']}/{room_details['max_participants']}\n"
-                f"💎 Версия: {'PRO' if room_details['is_paid'] else 'Бесплатная'}\n\n"
-                "Хотите присоединиться к этой комнате?"
-            )
-
-            # Создаем клавиатуру с кнопками подтверждения
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ Да", callback_data=f"confirm_join_{room_id}"),
-                    InlineKeyboardButton("❌ Нет", callback_data="cancel_join")
-                ]
-            ]
-            
-            await update.message.reply_text(
-                message,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            # Добавляем пользователя в комнату
+            if add_user_to_room(user_id, room_id):
+                await update.message.reply_text(
+                    f'✅ Вы успешно присоединились к комнате "{room_details["name"]}"!\n'
+                    f'Код комнаты: {room_details["code"]}',
+                    reply_markup=get_room_context_menu()
+                )
+            else:
+                await update.message.reply_text(
+                    '❌ Не удалось присоединиться к комнате. Попробуйте позже.',
+                    reply_markup=get_main_menu_keyboard()
+                )
         else:
-            # Если код комнаты не указан
             await update.message.reply_text(
-                '🔍 Введите код комнаты для поиска:',
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Назад", callback_data="main_menu")
-                ]])
+                'Пожалуйста, укажите код комнаты после команды /join_room',
+                reply_markup=get_main_menu_keyboard()
             )
-            context.user_data['waiting_for'] = 'room_code'
     elif update.callback_query:
         await update.callback_query.message.reply_text(
             '🔍 Введите код комнаты для поиска:'
@@ -954,3 +929,50 @@ async def cancel_delete_handler(update: Update, context: ContextTypes.DEFAULT_TY
         "✅ Удаление комнаты отменено.",
         reply_markup=get_main_menu_keyboard()
     )
+
+async def switch_room_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик переключения между комнатами"""
+    if not update.callback_query:
+        return
+        
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    # Получаем ID комнаты из callback_data
+    room_id = int(query.data.split('_')[2])
+    
+    try:
+        # Переключаем пользователя на выбранную комнату
+        success = switch_room(user_id, room_id)
+        
+        if success:
+            # Получаем информацию о комнате
+            room = get_room_by_id(room_id)
+            if room:
+                message = (
+                    f"✅ Вы переключились на комнату {room['name']}\n"
+                    f"🔑 Код комнаты: {room['code']}\n"
+                    f"👥 Участников: {room['current_users']}/{room['max_participants']}\n"
+                    f"{'💎 PRO' if room['is_paid'] else '🆓 Бесплатная'}"
+                )
+                await query.message.edit_text(
+                    message,
+                    reply_markup=get_room_context_menu()
+                )
+            else:
+                await query.message.edit_text(
+                    "❌ Ошибка: не удалось получить информацию о комнате",
+                    reply_markup=get_main_menu_keyboard()
+                )
+        else:
+            await query.message.edit_text(
+                "❌ Ошибка: не удалось переключиться на комнату",
+                reply_markup=get_main_menu_keyboard()
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка при переключении комнаты: {str(e)}")
+        await query.message.edit_text(
+            "❌ Произошла ошибка при переключении комнаты",
+            reply_markup=get_main_menu_keyboard()
+        )

@@ -68,7 +68,6 @@ class Room(Base):
     is_active = Column(Boolean, default=True, index=True)
     is_paid = Column(Boolean, default=False)
     max_participants = Column(Integer, default=5)
-    max_wishes = Column(Integer, default=1)
     description = Column(Text, nullable=True)
     last_activity = Column(DateTime, default=datetime.utcnow)
     
@@ -214,6 +213,11 @@ async def create_room(creator_id: int) -> Optional[int]:
     """Создает новую комнату и возвращает её ID"""
     session = Session()
     try:
+        # Проверяем, есть ли у пользователя уже созданная комната
+        if user_has_room(creator_id):
+            logger.warning(f"Пользователь {creator_id} попытался создать вторую комнату")
+            return None
+            
         # Сначала проверяем/создаем пользователя
         user = session.query(User).filter(User.telegram_id == creator_id).first()
         if not user:
@@ -232,7 +236,6 @@ async def create_room(creator_id: int) -> Optional[int]:
             creator_id=user.id,
             is_active=True,
             max_participants=5,  # Бесплатная версия
-            max_wishes=1  # Бесплатная версия
         )
         session.add(new_room)
         session.commit()
@@ -263,11 +266,9 @@ async def update_room_version(room_id: int, version: str) -> bool:
         if version == "pro":
             room.is_paid = True
             room.max_participants = PRO_MAX_USERS
-            room.max_wishes = PRO_MAX_WISHES
         else:
             room.is_paid = False
             room.max_participants = FREE_MAX_USERS
-            room.max_wishes = FREE_MAX_WISHES
             
         session.commit()
         session.close()
@@ -371,52 +372,34 @@ def count_users_in_room(room_id: int) -> int:
 
 
 def add_wish(user_id: int, wish_text: str) -> int:
-    """Добавляет желание пользователя и возвращает ID созданного желания"""
+    """Добавляет новое желание в базу данных"""
     session = Session()
     try:
-        # 1. Находим пользователя по telegram_id
-        user = session.query(User).filter(User.telegram_id == user_id).first()
+        # Получаем пользователя
+        user = session.query(User).filter(User.id == user_id).first()
         if not user:
-            logger.error(f"Пользователь с telegram_id {user_id} не найден")
+            logger.error(f"Пользователь {user_id} не найден")
             return 0
             
-        # 2. Проверяем, состоит ли пользователь в комнате
+        # Проверяем, что пользователь состоит в комнате
         if not user.room_id:
             logger.error(f"Пользователь {user_id} не состоит в комнате")
             return 0
             
-        # 3. Получаем комнату пользователя
-        room = session.query(Room).filter(Room.id == user.room_id).first()
-        if not room:
-            logger.error(f"Комната {user.room_id} не найдена")
-            return 0
-            
-        # 4. Проверяем количество желаний пользователя в этой комнате
-        current_wishes = session.query(Wish).filter(
-            Wish.user_id == user.id,
-            Wish.room_id == room.id
-        ).count()
-        
-        if current_wishes >= room.max_wishes:
-            logger.error(f"Достигнут лимит желаний для пользователя {user_id} в комнате {room.id}")
-            return 0
-            
-        # 5. Создаем новое желание
-        new_wish = Wish(
+        # Создаем новое желание
+        wish = Wish(
             text=wish_text,
-            user_id=user.id,
-            room_id=room.id
+            user_id=user_id,
+            room_id=user.room_id
         )
-        
-        # 6. Добавляем желание в сессию и сохраняем
-        session.add(new_wish)
+        session.add(wish)
         session.commit()
         
-        logger.info(f"Желание успешно добавлено для пользователя {user_id} в комнату {room.id}")
-        return new_wish.id
+        logger.info(f"Добавлено желание для пользователя {user_id}")
+        return wish.id
         
     except Exception as e:
-        logger.error(f"Ошибка при добавлении желания: {str(e)}")
+        logger.error(f"Ошибка при добавлении желания: {e}")
         session.rollback()
         return 0
     finally:
@@ -522,30 +505,21 @@ def get_all_rooms(telegram_id: int) -> list:
     """Получает список всех комнат пользователя с детальной информацией"""
     session = Session()
     try:
-        # Находим или создаем пользователя
-        user = session.query(User).filter(
-            User.telegram_id == telegram_id
-        ).first()
+        # Находим пользователя
+        user = session.query(User).filter(User.telegram_id == telegram_id).first()
         if not user:
-            user = User(telegram_id=telegram_id)
-            session.add(user)
-            session.commit()
-            logger.info(f"Создан новый пользователь: {telegram_id}")
+            logger.error(f"Пользователь {telegram_id} не найден")
             return []
         
         all_rooms = []
         
         # 1. Получаем комнаты, где пользователь является создателем
-        created_rooms = session.query(Room).filter(
-            Room.creator_id == user.telegram_id
-        ).all()
+        created_rooms = session.query(Room).filter(Room.creator_id == user.id).all()
         logger.info(f"Найдено созданных комнат: {len(created_rooms)}")
         
         for room in created_rooms:
             # Получаем список участников комнаты
-            participants = session.query(User).filter(
-                User.room_id == room.id
-            ).all()
+            participants = session.query(User).filter(User.room_id == room.id).all()
             participants_info = [
                 {
                     'telegram_id': p.telegram_id,
@@ -563,29 +537,25 @@ def get_all_rooms(telegram_id: int) -> list:
                 'is_active': room.is_active,
                 'is_paid': room.is_paid,
                 'max_participants': room.max_participants,
-                'max_wishes': room.max_wishes,
                 'current_users': len(participants),
                 'participants': participants_info,
                 'created_at': room.created_at.isoformat() if room.created_at else None,
                 'is_current': user.room_id == room.id
             })
         
-        # 2. Получаем все комнаты, к которым пользователь присоединился
-        # Используем новую таблицу связи
+        # 2. Получаем комнаты, к которым пользователь присоединился
         joined_rooms = session.query(Room).join(
             user_room_association, user_room_association.c.room_id == Room.id
         ).filter(
-            user_room_association.c.user_id == user.telegram_id,
-            Room.creator_id != user.telegram_id
+            user_room_association.c.user_id == user.id,
+            Room.creator_id != user.id
         ).all()
         
         logger.info(f"Найдено присоединенных комнат: {len(joined_rooms)}")
         
         for joined_room in joined_rooms:
             # Получаем список участников комнаты
-            participants = session.query(User).filter(
-                User.room_id == joined_room.id
-            ).all()
+            participants = session.query(User).filter(User.room_id == joined_room.id).all()
             participants_info = [
                 {
                     'telegram_id': p.telegram_id,
@@ -603,7 +573,6 @@ def get_all_rooms(telegram_id: int) -> list:
                 'is_active': joined_room.is_active,
                 'is_paid': joined_room.is_paid,
                 'max_participants': joined_room.max_participants,
-                'max_wishes': joined_room.max_wishes,
                 'current_users': len(participants),
                 'participants': participants_info,
                 'created_at': joined_room.created_at.isoformat() if joined_room.created_at else None,
@@ -614,9 +583,7 @@ def get_all_rooms(telegram_id: int) -> list:
         if user.room_id:
             current_room = session.query(Room).filter(Room.id == user.room_id).first()
             if current_room and not any(room['id'] == current_room.id for room in all_rooms):
-                participants = session.query(User).filter(
-                    User.room_id == current_room.id
-                ).all()
+                participants = session.query(User).filter(User.room_id == current_room.id).all()
                 participants_info = [
                     {
                         'telegram_id': p.telegram_id,
@@ -630,11 +597,10 @@ def get_all_rooms(telegram_id: int) -> list:
                     'id': current_room.id,
                     'code': current_room.code,
                     'name': f"Комната {current_room.code}",
-                    'is_creator': current_room.creator_id == user.telegram_id,
+                    'is_creator': current_room.creator_id == user.id,
                     'is_active': current_room.is_active,
                     'is_paid': current_room.is_paid,
                     'max_participants': current_room.max_participants,
-                    'max_wishes': current_room.max_wishes,
                     'current_users': len(participants),
                     'participants': participants_info,
                     'created_at': current_room.created_at.isoformat() if current_room.created_at else None,
@@ -674,6 +640,7 @@ def get_room_by_id(room_id: int) -> Optional[Dict[str, Any]]:
         return {
             'id': room.id,
             'code': room.code,
+            'name': f"Комната {room.code}",
             'max_participants': room.max_participants,
             'is_paid': room.is_paid,
             'current_users': count_users_in_room(room.id),
@@ -720,18 +687,26 @@ def switch_to_room(telegram_id: int, room_id: int) -> bool:
 
 
 def get_room_wishes(room_id: int) -> list:
-    """Получает список желаний в комнате"""
+    """Получает все желания в комнате"""
     session = Session()
     try:
-        wishes = session.query(Wish).filter(Wish.room_id == room_id).all()
+        wishes = session.query(Wish).filter(
+            Wish.room_id == room_id
+        ).all()
+        
         return [
             {
+                'id': wish.id,
                 'text': wish.text,
                 'user_id': wish.user_id,
-                'user_name': wish.user.username
+                'created_at': wish.created_at,
+                'is_viewed': wish.is_viewed
             }
             for wish in wishes
         ]
+    except Exception as e:
+        logger.error(f"Ошибка при получении желаний комнаты: {e}")
+        return []
     finally:
         session.close()
 
@@ -788,6 +763,7 @@ def get_room_details(room_identifier: Union[str, int]) -> Optional[Dict[str, Any
         return {
             'id': room.id,
             'code': room.code,
+            'name': f"Комната {room.code}",
             'max_participants': room.max_participants,
             'current_users': current_users,
             'wishes_per_user': wishes_per_user,
@@ -968,37 +944,42 @@ def get_room_by_code(code: str) -> Optional[Dict[str, Any]]:
         session.close()
 
 
-def switch_room(telegram_id: int, room_id: int) -> bool:
-    """Переключает пользователя на указанную комнату"""
+def switch_room(user_id: int, room_id: int) -> bool:
+    """Переключает текущую комнату пользователя"""
     session = Session()
     try:
-        # Проверяем существование пользователя
-        user = session.query(User).filter(User.telegram_id == telegram_id).first()
+        # Находим пользователя
+        user = session.query(User).filter(User.telegram_id == user_id).first()
         if not user:
-            logger.error(f"Пользователь {telegram_id} не найден")
+            logger.error(f"Пользователь {user_id} не найден")
             return False
             
-        # Проверяем существование комнаты
+        # Находим комнату
         room = session.query(Room).filter(Room.id == room_id).first()
         if not room:
             logger.error(f"Комната {room_id} не найдена")
             return False
             
-        # Проверяем, является ли пользователь создателем комнаты
-        if room.creator_id != user.id:
-            logger.error(
-                f"Пользователь {telegram_id} не является создателем комнаты {room_id}"
-            )
+        # Проверяем, является ли пользователь создателем комнаты или участником
+        is_creator = room.creator_id == user.id
+        is_participant = session.query(user_room_association).filter(
+            user_room_association.c.user_id == user.id,
+            user_room_association.c.room_id == room_id
+        ).first() is not None
+        
+        if not (is_creator or is_participant):
+            logger.error(f"Пользователь {user_id} не имеет доступа к комнате {room_id}")
             return False
             
-        # Переключаем пользователя на комнату
+        # Обновляем текущую комнату пользователя
         user.room_id = room_id
         session.commit()
-        logger.info(f"Пользователь {telegram_id} переключен на комнату {room_id}")
+        
+        logger.info(f"Пользователь {user_id} переключился на комнату {room_id}")
         return True
+        
     except Exception as e:
-        logger.error(f"Ошибка при переключении на комнату: {str(e)}")
-        session.rollback()
+        logger.error(f"Ошибка при переключении комнаты: {str(e)}")
         return False
     finally:
         session.close()
@@ -1369,5 +1350,62 @@ def leave_room(user_id: int, room_id: int) -> tuple[bool, str]:
         session.rollback()
         logger.error(f"Ошибка при отключении от комнаты: {e}")
         return False, "Ошибка при отключении от комнаты"
+    finally:
+        session.close()
+
+
+def get_user_by_telegram_id(telegram_id: int) -> Optional[User]:
+    """
+    Получает пользователя по его Telegram ID
+    
+    Args:
+        telegram_id: Telegram ID пользователя
+        
+    Returns:
+        User: Объект пользователя или None, если пользователь не найден
+    """
+    try:
+        session = Session()
+        user = session.query(User).filter(User.telegram_id == telegram_id).first()
+        return user
+    except Exception as e:
+        logger.error(f"Ошибка при получении пользователя по Telegram ID {telegram_id}: {str(e)}")
+        return None
+    finally:
+        session.close()
+
+
+def check_user_in_room(telegram_id: int, room_id: int) -> bool:
+    """
+    Проверяет, является ли пользователь участником комнаты
+    
+    Args:
+        telegram_id: Telegram ID пользователя
+        room_id: ID комнаты
+        
+    Returns:
+        bool: True, если пользователь является участником комнаты, иначе False
+    """
+    try:
+        session = Session()
+        user = session.query(User).filter(User.telegram_id == telegram_id).first()
+        if not user:
+            return False
+            
+        # Проверяем, является ли пользователь создателем комнаты
+        room = session.query(Room).filter(Room.id == room_id).first()
+        if room and room.creator_id == user.id:
+            return True
+            
+        # Проверяем, является ли пользователь участником комнаты через таблицу связи
+        association = session.query(user_room_association).filter(
+            user_room_association.c.user_id == user.id,
+            user_room_association.c.room_id == room_id
+        ).first()
+        
+        return association is not None
+    except Exception as e:
+        logger.error(f"Ошибка при проверке участия пользователя {telegram_id} в комнате {room_id}: {str(e)}")
+        return False
     finally:
         session.close()
