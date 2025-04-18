@@ -10,7 +10,8 @@ from start import start_command, help_command, button_handler
 from rooms import (
     create_room_handler, join_room_handler, handle_room_code,
     handle_room_version, list_rooms, search_room, confirm_join_handler,
-    handle_room_context_menu
+    handle_room_context_menu, delete_room_handler, confirm_delete_handler,
+    cancel_delete_handler
 )
 from wishes import handle_wish_text, edit_wish_handler, handle_edit_wish_text
 from database import init_bd, switch_room, get_room_by_id
@@ -44,7 +45,7 @@ async def switch_room_handler(update: Update, context):
     # Получаем информацию о комнате
     room = get_room_by_id(room_id)
     if not room:
-        await query.message.reply_text(
+        await query.message.edit_text(
             "❌ Не удалось получить информацию о комнате.",
             reply_markup=get_main_menu_keyboard()
         )
@@ -54,17 +55,16 @@ async def switch_room_handler(update: Update, context):
     success = switch_room(user_id, room_id)
     
     if success:
-        await query.message.reply_text(
+        await query.message.edit_text(
             "✅ Вы успешно переключились на комнату!\n"
-            f"🔑 Код комнаты: {room['code']}\n"
-            f"🆔 ID комнаты: {room['id']}",
+            f"🏠 Название комнаты: {room['name']}\n"
+            f"🔑 Код комнаты: {room['code']}",
             reply_markup=get_main_menu_keyboard()
         )
     else:
-        await query.message.reply_text(
+        await query.message.edit_text(
             "❌ Не удалось переключиться на указанную комнату.\n"
-            "Возможно, вы не являетесь создателем этой комнаты.\n"
-            "Пожалуйста, проверьте права доступа.",
+            "Пожалуйста, проверьте права доступа или попробуйте позже.",
             reply_markup=get_main_menu_keyboard()
         )
 
@@ -173,6 +173,26 @@ def main():
             CallbackQueryHandler(
                 handle_room_context_menu,
                 pattern="^(add_wish|list_wishes|list_room_users|main_menu|room_menu)$"
+            )
+        )
+        
+        # Добавляем обработчики для удаления комнаты
+        application.add_handler(
+            CallbackQueryHandler(
+                delete_room_handler,
+                pattern="^delete_room_\\d+$"
+            )
+        )
+        application.add_handler(
+            CallbackQueryHandler(
+                confirm_delete_handler,
+                pattern="^confirm_delete_\\d+$"
+            )
+        )
+        application.add_handler(
+            CallbackQueryHandler(
+                cancel_delete_handler,
+                pattern="^cancel_delete$"
             )
         )
         

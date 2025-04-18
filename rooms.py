@@ -2,8 +2,11 @@ import random
 import string
 import logging
 from database import (
-    create_room, count_users_in_room, add_user_to_room, 
-    user_has_room, room_exists, get_room_details, get_room_id_by_code, add_user, get_all_rooms, generate_room_code, count_user_rooms, get_user_room, get_room_users
+    create_room, count_users_in_room, add_user_to_room, user_has_room,
+    room_exists, get_room_details, get_room_id_by_code, add_user,
+    get_all_rooms, generate_room_code, count_user_rooms, get_user_room,
+    get_room_users, update_room_version, get_user_rooms_count, MAX_ROOMS_PER_USER,
+    get_user_wishes
 )
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -139,158 +142,102 @@ async def create_room_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def join_room_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды присоединения к комнате"""
-    logger.info("Вызван обработчик присоединения к комнате")
-    
     if not update.effective_user:
         if update.message:
             await update.message.reply_text('Ошибка: не удалось определить пользователя')
         return
 
     user_id = update.effective_user.id
-    user_name = update.effective_user.username
     
-    # Если это callback query, запрашиваем код комнаты
-    if update.callback_query:
-        await update.callback_query.message.reply_text(
-            'Пожалуйста, введите код комнаты в формате:\n'
-            '/join_room "код комнаты"'
+    # Проверяем количество комнат пользователя перед присоединением
+    rooms_count = await get_user_rooms_count(user_id)
+    logger.info(f"Пользователь {user_id} имеет {rooms_count} комнат, лимит {MAX_ROOMS_PER_USER}")
+    
+    if rooms_count >= MAX_ROOMS_PER_USER:
+        await update.message.reply_text(
+            "❌ Вы достигли лимита в 3 комнаты. "
+            "Пожалуйста, выйдите из одной из существующих комнат, "
+            "чтобы присоединиться к новой.",
+            reply_markup=get_main_menu_keyboard()
         )
         return
     
-    # Если это сообщение с кодом комнаты (не команда)
-    if update.message and not update.message.text.startswith('/'):
-        room_code = update.message.text.strip().upper()
-        logger.info(f"Пользователь {user_id} пытается присоединиться к комнате с кодом {room_code}")
-        
-        room_id = get_room_id_by_code(room_code)
-        logger.info(f"Получен ID комнаты: {room_id}")
-        
-        if room_id == 0:
-            await update.message.reply_text(
-                '❌ Комната не найдена. Проверьте код и попробуйте снова.'
-            )
-            return
+    if update.message and update.message.text.startswith('/join_room'):
+        args = update.message.text.split()
+        if len(args) > 1:
+            # Если код комнаты указан в команде
+            room_code = args[1].upper()
+            logger.info(f"Поиск комнаты с кодом: {room_code}")
+            
+            room_id = get_room_id_by_code(room_code)
+            if not room_id:
+                await update.message.reply_text(
+                    '❌ Комната не найдена. Проверьте код и попробуйте снова.',
+                    reply_markup=get_main_menu_keyboard()
+                )
+                return
+            
+            # Получаем информацию о комнате
+            room_details = get_room_details(room_id)
+            if not room_details:
+                await update.message.reply_text(
+                    '❌ Не удалось получить информацию о комнате',
+                    reply_markup=get_main_menu_keyboard()
+                )
+                return
 
-        if not room_exists(room_id):
-            logger.error(f"Комната {room_id} не существует в базе данных")
-            await update.message.reply_text(
-                '❌ Комната с таким кодом не существует((' 
-            )
-            return
+            # Проверяем, не состоит ли пользователь уже в этой комнате
+            user_room = get_user_room(user_id)
+            if user_room and user_room['id'] == room_id:
+                await update.message.reply_text(
+                    '❌ Вы уже состоите в этой комнате',
+                    reply_markup=get_main_menu_keyboard()
+                )
+                return
 
-        room_details = get_room_details(room_id)
-        if not room_details:
-            logger.error(f"Не удалось получить детали комнаты {room_id}")
-            await update.message.reply_text(
-                '❌ Ошибка при получении информации о комнате'
-            )
-            return
+            # Проверяем наличие свободных мест
+            if room_details['current_users'] >= room_details['max_participants']:
+                await update.message.reply_text(
+                    '❌ В комнате больше нет свободных мест',
+                    reply_markup=get_main_menu_keyboard()
+                )
+                return
 
-        current_users = count_users_in_room(room_id)
-        logger.info(f"Текущее количество пользователей в комнате: {current_users}")
-        
-        if current_users >= room_details['max_participants']:
-            await update.message.reply_text(
-                '❌ Комната уже заполнена((\n'
-                'Если вы хотите расширить комнату и порадовать Санту, '
-                'то используйте /pay'
+            # Формируем сообщение с информацией о комнате
+            message = (
+                f"🔍 Найдена комната:\n\n"
+                f"🏠 Название: {room_details['name']}\n"
+                f"👥 Участников: {room_details['current_users']}/{room_details['max_participants']}\n"
+                f"💎 Версия: {'PRO' if room_details['is_paid'] else 'Бесплатная'}\n\n"
+                "Хотите присоединиться к этой комнате?"
             )
-            return
 
-        # Проверяем, сколько комнат у пользователя
-        user_rooms_count = count_user_rooms(user_id)
-        logger.info(f"Количество комнат у пользователя: {user_rooms_count}")
-        
-        if user_rooms_count >= 3:
+            # Создаем клавиатуру с кнопками подтверждения
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Да", callback_data=f"confirm_join_{room_id}"),
+                    InlineKeyboardButton("❌ Нет", callback_data="cancel_join")
+                ]
+            ]
+            
             await update.message.reply_text(
-                "❌ Вы уже состоите в максимальном количестве комнат (3). "
-                "Пожалуйста, покиньте одну из комнат, чтобы присоединиться к новой."
-            )
-            return
-
-        logger.info(f"Пользователь {user_id} присоединяется к комнате {room_id}")
-        success = add_user_to_room(room_id, user_id)
-        if success:
-            await update.message.reply_text(
-                f'✅ Вы успешно присоединились к комнате "{room_details["name"]}"!\n'
-                f'🔑 Код комнаты: {room_details["code"]}\n'
-                f'👥 Участников: {count_users_in_room(room_id)}/{room_details["max_participants"]}'
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
         else:
+            # Если код комнаты не указан
             await update.message.reply_text(
-                '❌ Не удалось присоединиться к комнате. Возможно, произошла ошибка.'
+                '🔍 Введите код комнаты для поиска:',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Назад", callback_data="main_menu")
+                ]])
             )
-        return
-    
-    # Если это команда /join_room
-    if not context.args:
-        await update.message.reply_text(
-            'Неверный код комнаты!\n'
-            'Укажите корректно ваш код комнаты: /join_room "код"'
+            context.user_data['waiting_for'] = 'room_code'
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(
+            '🔍 Введите код комнаты для поиска:'
         )
-        return
-
-    room_code = context.args[0].upper()  # Преобразуем код в верхний регистр
-    logger.info(f"Пользователь {user_id} пытается присоединиться к комнате с кодом {room_code}")
-    
-    room_id = get_room_id_by_code(room_code)
-    logger.info(f"Получен ID комнаты: {room_id}")
-    
-    if room_id == 0:
-        await update.message.reply_text(
-            '❌ Комната не найдена. Проверьте код и попробуйте снова.'
-        )
-        return
-
-    if not room_exists(room_id):
-        logger.error(f"Комната {room_id} не существует в базе данных")
-        await update.message.reply_text(
-            '❌ Комната с таким кодом не существует(('
-        )
-        return
-
-    room_details = get_room_details(room_id)
-    if not room_details:
-        logger.error(f"Не удалось получить детали комнаты {room_id}")
-        await update.message.reply_text(
-            '❌ Ошибка при получении информации о комнате'
-        )
-        return
-
-    current_users = count_users_in_room(room_id)
-    logger.info(f"Текущее количество пользователей в комнате: {current_users}")
-    
-    if current_users >= room_details['max_participants']:
-        await update.message.reply_text(
-            '❌ Комната уже заполнена((\n'
-            'Если вы хотите расширить комнату и порадовать Санту, '
-            'то используйте /pay'
-        )
-        return
-
-    # Проверяем, сколько комнат у пользователя
-    user_rooms_count = count_user_rooms(user_id)
-    logger.info(f"Количество комнат у пользователя: {user_rooms_count}")
-    
-    if user_rooms_count >= 3:
-        await update.message.reply_text(
-            "❌ Вы уже состоите в максимальном количестве комнат (3). "
-            "Пожалуйста, покиньте одну из комнат, чтобы присоединиться к новой."
-        )
-        return
-
-    logger.info(f"Пользователь {user_id} присоединяется к комнате {room_id}")
-    success = add_user_to_room(room_id, user_id)
-    if success:
-        await update.message.reply_text(
-            f'✅ Вы успешно присоединились к комнате "{room_details["name"]}"!\n'
-            f'🔑 Код комнаты: {room_details["code"]}\n'
-            f'👥 Участников: {count_users_in_room(room_id)}/{room_details["max_participants"]}'
-        )
-    else:
-        await update.message.reply_text(
-            '❌ Не удалось присоединиться к комнате. Возможно, произошла ошибка.'
-        )
+        context.user_data['waiting_for'] = 'room_code'
 
 
 async def join_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -384,18 +331,56 @@ async def handle_room_creation(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    await query.message.reply_text(
-        "🎄 Выбери версию комнаты:\n\n"
-        "🎁 *Бесплатная версия:*\n"
-        f"- До {FREE_MAX_USERS} участников\n"
-        "- 1 желание на участника\n\n"
-        "✨ *PRO версия:*\n"
-        f"- До {PRO_MAX_USERS} участников\n"
-        "- 5 желаний на участника\n"
-        "- Приоритетная поддержка",
-        parse_mode='Markdown',
-        reply_markup=get_room_version_keyboard()
-    )
+    try:
+        # Проверяем количество комнат пользователя
+        user_id = update.effective_user.id
+        rooms_count = await get_user_rooms_count(user_id)
+        
+        logger.info(f"Пользователь {user_id} имеет {rooms_count} комнат, лимит {MAX_ROOMS_PER_USER}")
+        
+        if rooms_count >= MAX_ROOMS_PER_USER:
+            await query.message.edit_text(
+                "❌ Вы достигли лимита в 3 комнаты. "
+                "Пожалуйста, удалите одну из существующих комнат, "
+                "чтобы создать новую.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+        
+        # Создаем комнату в БД
+        room_id = await create_room(user_id)
+        if not room_id:
+            await query.message.edit_text(
+                "❌ Произошла ошибка при создании комнаты. "
+                "Пожалуйста, попробуйте позже.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+        
+        # Сохраняем ID комнаты в контексте
+        context.user_data['creating_room_id'] = room_id
+        
+        # Показываем меню выбора версии
+        await query.message.edit_text(
+            "🎄 Выбери версию комнаты:\n\n"
+            "🎁 *Бесплатная версия:*\n"
+            f"- До {FREE_MAX_USERS} участников\n"
+            "- 1 желание на участника\n\n"
+            "✨ *PRO версия:*\n"
+            f"- До {PRO_MAX_USERS} участников\n"
+            "- 5 желаний на участника\n"
+            "- Приоритетная поддержка",
+            parse_mode='Markdown',
+            reply_markup=get_room_version_keyboard()
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in handle_room_creation: {e}")
+        await query.message.edit_text(
+            "❌ Произошла ошибка при создании комнаты. "
+            "Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_menu_keyboard()
+        )
 
 
 async def join_room(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -476,21 +461,75 @@ async def handle_room_version(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     
-    data = query.data.split('_')
-    action = data[0]
-    room_id = int(data[2])
+    # Получаем callback_data
+    callback_data = query.data
     
-    if action == "pay":
-        # Логика для оплаты полного доступа
+    # Определяем выбранную версию
+    if callback_data == "free_version":
+        version = "free"
+    elif callback_data == "pro_version":
+        version = "pro"
+    else:
+        logger.error(f"Неизвестная версия комнаты: {callback_data}")
         await query.message.edit_text(
-            "Вы выбрали полный доступ. Функционал оплаты будет добавлен позже.",
-            reply_markup=get_room_context_menu()
+            "Произошла ошибка при выборе версии комнаты. Пожалуйста, попробуйте снова.",
+            reply_markup=get_main_menu_keyboard()
         )
-    elif action == "stay":
-        # Логика для бесплатной версии
+        return
+    
+    # Получаем ID комнаты из контекста
+    room_id = context.user_data.get('creating_room_id')
+    if not room_id:
         await query.message.edit_text(
-            "Вы выбрали бесплатную версию. Наслаждайтесь!",
-            reply_markup=get_room_context_menu()
+            "Произошла ошибка при создании комнаты. Пожалуйста, попробуйте снова.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+    
+    try:
+        # Получаем информацию о комнате, чтобы вывести её код
+        room_info = get_room_details(room_id)
+        if not room_info:
+            await query.message.edit_text(
+                "Произошла ошибка при получении информации о комнате. Пожалуйста, попробуйте снова.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+            
+        room_code = room_info['code']
+        
+        if version == "free":
+            # Обновляем статус комнаты на бесплатную версию
+            await update_room_version(room_id, "free")
+            await query.message.edit_text(
+                "🎁 Комната создана в бесплатной версии!\n\n"
+                "Возможности:\n"
+                "- До 5 участников\n"
+                "- 1 желание на участника\n\n"
+                f"🔑 Код вашей комнаты: {room_code}",
+                reply_markup=get_room_context_menu()
+            )
+        elif version == "pro":
+            # Обновляем статус комнаты на PRO версию
+            await update_room_version(room_id, "pro")
+            await query.message.edit_text(
+                "✨ Комната создана в PRO версии!\n\n"
+                "Возможности:\n"
+                "- До 10 участников\n"
+                "- 5 желаний на участника\n"
+                "- Приоритетная поддержка\n\n"
+                f"🔑 Код вашей комнаты: {room_code}",
+                reply_markup=get_room_context_menu()
+            )
+        
+        # Очищаем ID создаваемой комнаты из контекста
+        context.user_data.pop('creating_room_id', None)
+        
+    except Exception as e:
+        logger.error(f"Error in handle_room_version: {e}")
+        await query.message.edit_text(
+            "Произошла ошибка при создании комнаты. Пожалуйста, попробуйте снова.",
+            reply_markup=get_main_menu_keyboard()
         )
 
 
@@ -506,13 +545,16 @@ async def list_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     try:
+        # Получаем список комнат пользователя
         rooms = get_all_rooms(user_id)
+        logger.info(f"Найдено комнат: {len(rooms)}")
         
         if not rooms:
+            text = "У вас пока нет комнат. Создайте новую комнату или присоединитесь к существующей!"
             if update.callback_query:
-                await update.callback_query.message.reply_text(
-                    "У вас пока нет комнат. Создайте новую комнату или присоединитесь к существующей!"
-                )
+                await update.callback_query.message.edit_text(text, reply_markup=get_main_menu_keyboard())
+            else:
+                await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
             return
             
         message = "📋 Ваши комнаты:\n\n"
@@ -520,17 +562,37 @@ async def list_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Создаем клавиатуру с кнопками для каждой комнаты
         keyboard = []
         for i, room in enumerate(rooms, 1):
+            # Проверяем наличие всех необходимых полей
+            room_name = room.get('name', 'Без названия')
+            room_code = room.get('code', 'Нет кода')
+            room_id = room.get('id', 0)
+            current_users = room.get('current_users', 0)
+            max_participants = room.get('max_participants', 0)
+            is_paid = room.get('is_paid', False)
+            is_creator = room.get('is_creator', False)
+            is_current = room.get('is_current', False)
+            
+            # Добавляем статус создателя и текущей комнаты, если применимо
+            status = []
+            if is_creator:
+                status.append("Вы создатель")
+            if is_current:
+                status.append("Текущая комната")
+            
+            status_text = f" ({', '.join(status)})" if status else ""
+            
             message += (
-                f"{i}. {room['name']}\n"
-                f"   👥 Участников: {room['current_users']}/{room['max_participants']}\n"
-                f"   {'💎 PRO' if room['is_paid'] else '🆓 Бесплатная'}\n\n"
+                f"{i}. {room_name}{status_text}\n"
+                f"   🔑 Код: {room_code}\n"
+                f"   👥 Участников: {current_users}/{max_participants}\n"
+                f"   {'💎 PRO' if is_paid else '🆓 Бесплатная'}\n\n"
             )
             
-            # Добавляем кнопку для переключения на эту комнату
+            # Добавляем только кнопку для переключения на эту комнату
             keyboard.append([
                 InlineKeyboardButton(
-                    f"Переключиться на {room['name']}", 
-                    callback_data=f"switch_room_{room['id']}"
+                    f"Переключиться на {room_name}", 
+                    callback_data=f"switch_room_{room_id}"
                 )
             ])
             
@@ -542,13 +604,19 @@ async def list_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message,
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+        else:
+            await update.message.reply_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             
     except Exception as e:
         logger.error(f"Ошибка при получении списка комнат: {str(e)}")
+        text = "❌ Произошла ошибка при получении списка комнат. Пожалуйста, попробуйте позже."
         if update.callback_query:
-            await update.callback_query.message.reply_text(
-                "❌ Произошла ошибка при получении списка комнат. Пожалуйста, попробуйте позже."
-            )
+            await update.callback_query.message.edit_text(text, reply_markup=get_main_menu_keyboard())
+        else:
+            await update.message.reply_text(text, reply_markup=get_main_menu_keyboard())
 
 
 async def search_room(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -627,34 +695,62 @@ async def confirm_join_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         room_id = int(query.data.split('_')[2])
         user_id = query.from_user.id
         
+        # Проверяем количество комнат пользователя
+        rooms_count = await get_user_rooms_count(user_id)
+        logger.info(f"Пользователь {user_id} имеет {rooms_count} комнат, лимит {MAX_ROOMS_PER_USER}")
+        
+        if rooms_count >= MAX_ROOMS_PER_USER:
+            await query.message.edit_text(
+                "❌ Вы достигли лимита в 3 комнаты. "
+                "Пожалуйста, выйдите из одной из существующих комнат, "
+                "чтобы присоединиться к новой.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+        
         # Получаем актуальную информацию о комнате
         room = get_room_details(room_id)
         if not room:
-            await query.message.reply_text('❌ Комната больше не существует')
+            await query.message.edit_text(
+                '❌ Комната больше не существует',
+                reply_markup=get_main_menu_keyboard()
+            )
             return
             
         # Проверяем наличие свободных мест
         if room['current_users'] >= room['max_participants']:
-            await query.message.reply_text('❌ В комнате больше нет свободных мест')
+            await query.message.edit_text(
+                '❌ В комнате больше нет свободных мест',
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+        
+        # Проверяем, не состоит ли пользователь уже в этой комнате
+        user_room = get_user_room(user_id)
+        if user_room and user_room['id'] == room_id:
+            await query.message.edit_text(
+                '❌ Вы уже состоите в этой комнате',
+                reply_markup=get_main_menu_keyboard()
+            )
             return
             
         # Добавляем пользователя в комнату
         if add_user_to_room(room_id, user_id):
-            await query.message.reply_text(
+            await query.message.edit_text(
                 f"✅ Вы успешно присоединились к комнате!\n"
                 f"🏠 Название: {room['name']}\n"
                 f"🔑 Код комнаты: {room['code']}",
                 reply_markup=get_main_menu_keyboard()
             )
         else:
-            await query.message.reply_text(
+            await query.message.edit_text(
                 '❌ Не удалось присоединиться к комнате',
                 reply_markup=get_main_menu_keyboard()
             )
             
     except Exception as e:
         logger.error(f"Ошибка при присоединении к комнате: {str(e)}")
-        await query.message.reply_text(
+        await query.message.edit_text(
             '❌ Произошла ошибка при обработке запроса',
             reply_markup=get_main_menu_keyboard()
         )
@@ -665,6 +761,7 @@ async def handle_room_context_menu(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     
     action = query.data
+    logger.info(f"Получен callback_data: {action}")
     
     if action == "add_wish":
         # Перенаправляем на добавление желания
@@ -687,8 +784,19 @@ async def handle_room_context_menu(update: Update, context: ContextTypes.DEFAULT
                 reply_markup=get_main_menu_keyboard()
             )
             return
+        
+        # Получаем ID комнаты и проверяем его тип
+        room_id = user_room.get('id')
+        if not room_id:
+            await query.message.edit_text(
+                "❌ Не удалось определить ID комнаты.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
             
-        wishes = list_wishes(user_id, user_room['room_id'])
+        # Используем get_user_wishes
+        wishes = get_user_wishes(user_id, int(room_id))
+        
         if not wishes:
             await query.message.edit_text(
                 "📋 У вас пока нет желаний в этой комнате.",
@@ -698,7 +806,8 @@ async def handle_room_context_menu(update: Update, context: ContextTypes.DEFAULT
             
         message = "📋 Ваши желания:\n\n"
         for i, wish in enumerate(wishes, 1):
-            message += f"{i}. {wish['text']}\n"
+            wish_text = wish.get('text', 'Нет текста')
+            message += f"{i}. {wish_text}\n"
             
         await query.message.edit_text(
             message,
@@ -717,7 +826,15 @@ async def handle_room_context_menu(update: Update, context: ContextTypes.DEFAULT
             )
             return
             
-        room = get_room_details(user_room['room_id'])
+        room_id = user_room.get('id')
+        if not room_id:
+            await query.message.edit_text(
+                "❌ Не удалось определить ID комнаты.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+            
+        room = get_room_details(room_id)
         if not room:
             await query.message.edit_text(
                 "❌ Комната не найдена.",
@@ -725,12 +842,14 @@ async def handle_room_context_menu(update: Update, context: ContextTypes.DEFAULT
             )
             return
             
-        users = get_room_users(user_room['room_id'])
+        users = get_room_users(room_id)
         message = f"👥 Участники комнаты '{room['name']}':\n\n"
         
         for user in users:
-            role = "👑 Создатель" if user['id'] == room['creator_id'] else "👤 Участник"
-            message += f"{role}: {user['first_name']} {user['last_name'] or ''}\n"
+            role = "👑 Создатель" if user.get('id') == room.get('creator_id') else "👤 Участник"
+            first_name = user.get('first_name', '')
+            last_name = user.get('last_name', '')
+            message += f"{role}: {first_name} {last_name or ''}\n"
             
         await query.message.edit_text(
             message,
@@ -750,3 +869,88 @@ async def handle_room_context_menu(update: Update, context: ContextTypes.DEFAULT
             "Меню комнаты:",
             reply_markup=get_room_context_menu()
         )
+
+async def delete_room_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик удаления комнаты"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Получаем ID комнаты из callback_data
+        room_id = int(query.data.split('_')[2])
+        user_id = query.from_user.id
+        
+        logger.info(f"Попытка удаления комнаты {room_id} пользователем {user_id}")
+        
+        # Получаем информацию о комнате
+        room_info = get_room_details(room_id)
+        if not room_info:
+            await query.message.edit_text(
+                "❌ Комната не найдена. Возможно, она уже удалена.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+        
+        # Запрашиваем подтверждение удаления
+        await query.message.edit_text(
+            f"🗑️ Вы действительно хотите удалить комнату '{room_info['name']}'?\n\n"
+            "⚠️ Это действие нельзя отменить. "
+            "Все желания пользователей в комнате будут удалены.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{room_id}"),
+                    InlineKeyboardButton("❌ Нет, отмена", callback_data="cancel_delete")
+                ]
+            ])
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при подготовке к удалению комнаты: {e}")
+        await query.message.edit_text(
+            "❌ Произошла ошибка при обработке запроса. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+async def confirm_delete_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик подтверждения удаления комнаты"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Получаем ID комнаты из callback_data
+        room_id = int(query.data.split('_')[2])
+        user_id = query.from_user.id
+        
+        logger.info(f"Подтверждено удаление комнаты {room_id} пользователем {user_id}")
+        
+        # Удаляем комнату
+        from database import delete_room
+        if delete_room(room_id, user_id):
+            await query.message.edit_text(
+                "✅ Комната успешно удалена.",
+                reply_markup=get_main_menu_keyboard()
+            )
+        else:
+            await query.message.edit_text(
+                "❌ Не удалось удалить комнату. Возможно, у вас нет прав на это действие.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка при удалении комнаты: {e}")
+        await query.message.edit_text(
+            "❌ Произошла ошибка при удалении комнаты. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+async def cancel_delete_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик отмены удаления комнаты"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.edit_text(
+        "✅ Удаление комнаты отменено.",
+        reply_markup=get_main_menu_keyboard()
+    )
